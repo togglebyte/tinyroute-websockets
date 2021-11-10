@@ -1,4 +1,4 @@
-pub type Resul<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -7,4 +7,7 @@ pub enum Error {
 
     #[error("Websocket error")]
     Websocket(#[from] async_tungstenite::tungstenite::Error),
+
+    #[error("Io error")]
+    Io(#[from] std::io::Error),
 }

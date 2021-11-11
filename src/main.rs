@@ -12,8 +12,13 @@ function open(event) {
     ws.send(payload);
 }
 
+function getThings(arr) {
+    let first = arr[0];
+    
+}
+
 function message(message) {
-    console.log("Message: ", message.data);
+    let text = message.data.text().then(text => console.log(text));
 }
 
 let ws = new WebSocket("ws://127.0.0.1:5567");

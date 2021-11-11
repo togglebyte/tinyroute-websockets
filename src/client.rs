@@ -4,6 +4,7 @@ use async_tungstenite::WebSocketStream;
 use async_tungstenite::tungstenite::Message as WsMessage;
 use futures::{SinkExt, StreamExt};
 use tinyroute::spawn;
+use tinyroute::frame::{FrameOutput, Frame};
 use tinyroute::client::{TcpStream, ClientMessage, ClientSender, ClientReceiver};
 use tinyroute::channels::{unbounded, Sender, Receiver};
 
@@ -18,10 +19,22 @@ type Stream = futures::stream::SplitStream<WebSocketStream<async_tungstenite::to
 type Sink = futures::stream::SplitSink<WebSocketStream<async_tungstenite::tokio::TokioAdapter<TcpStream>>, WsMessage>;
 
 // -----------------------------------------------------------------------------
+//     - Async Std -
+// -----------------------------------------------------------------------------
+#[cfg(feature = "async-std-rt")]
+use async_tungstenite::async_std::connect_async;
+
+// -----------------------------------------------------------------------------
+//     - Smol -
+// -----------------------------------------------------------------------------
+#[cfg(feature = "smol-rt")]
+mod connect;
+#[cfg(feature = "smol-rt")]
+use connect::connect_async;
+
+// -----------------------------------------------------------------------------
 //     - Not Tokio -
 // -----------------------------------------------------------------------------
-#[cfg(not(feature = "tokio-rt"))]
-use async_tungstenite::connect_async;
 #[cfg(not(feature = "tokio-rt"))]
 type Stream = futures::stream::SplitStream<WebSocketStream<TcpStream>>;
 #[cfg(not(feature = "tokio-rt"))]
@@ -29,26 +42,20 @@ type Sink = futures::stream::SplitSink<WebSocketStream<TcpStream>, WsMessage>;
 
 use crate::errors::Result;
 
-// TODO: change `TcpStream` to something more generic
-pub async fn connect(addr: &str, heartbeat: Option<Duration>) -> Result<(ClientSender, ClientReceiver)> {
+pub async fn connect(addr: impl AsRef<str>, heartbeat: Option<Duration>) -> Result<(ClientSender, ClientReceiver)> {
     let (writer_tx, writer_rx) = unbounded();
     let (reader_tx, reader_rx) = unbounded();
 
-    let (stream, _response) = connect_async(addr).await?;
+    let (stream, _response) = connect_async(addr.as_ref()).await?;
     let (sink, stream) = stream.split();
 
-    let read_handle = spawn(use_reader(stream, reader_tx, writer_tx.clone()));
-    let write_handle = spawn(use_writer(sink, writer_rx));
+    let _read_handle = spawn(use_reader(stream, reader_tx, writer_tx.clone()));
+    let _write_handle = spawn(use_writer(sink, writer_rx));
 
     #[cfg(feature="smol-rt")]
     {
-        read_handle.detach();
-        write_handle.detach();
-    }
-    #[cfg(not(feature="smol-rt"))]
-    {
-        let _ = read_handle;
-        let _ = write_handle;
+        _read_handle.detach();
+        _write_handle.detach();
     }
 
     if let Some(freq) = heartbeat {
@@ -63,8 +70,10 @@ pub async fn connect(addr: &str, heartbeat: Option<Duration>) -> Result<(ClientS
 async fn use_reader(
     mut reader: Stream,
     output_tx: Sender<Vec<u8>>,
-    writer_tx: Sender<ClientMessage>,
+    writer_tx: ClientSender,
 ) {
+    let mut frame = Frame::empty();
+
     'read: loop {
         let res = match reader.next().await {
             Some(m) => m,
@@ -79,10 +88,33 @@ async fn use_reader(
                     WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
                     WsMessage::Close(_) => break 'read,
                 };
-                if let Err(e) = output_tx.send_async(bytes).await {
-                    log::error!("Failed to send client message: {}", e);
-                    break 'read;
+
+                // Extend the frame with the payload.
+                // If zero bytes were returned this means (unlike sockets)
+                // that the payload is too large and thus malformed 
+                // (as it should've been chunked up)
+                if frame.extend(&bytes) == 0 {
+                    break 'read
                 }
+
+                'msg: loop {
+                    match frame.try_msg() {
+                        Ok(Some(FrameOutput::Message(msg))) => {
+                            if let Err(e) = output_tx.send_async(msg).await {
+                                log::error!("Failed to send client message: {}", e);
+                                break 'read;
+                            }
+                        }
+                        Ok(Some(FrameOutput::Heartbeat)) => continue,
+                        Ok(None) => break 'msg,
+                        Err(tinyroute::errors::Error::MalformedHeader) => {
+                            log::error!("Malformed header");
+                            break 'read;
+                        }
+                        Err(_) => unreachable!(),
+                    }
+                }
+
             },
             Err(e) => {
                 log::error!("Connection closed: {}", e);
@@ -101,8 +133,10 @@ async fn use_writer(
 ) -> Result<()> {
     loop {
         let msg = rx.recv_async().await.map_err(|_| tinyroute::errors::Error::ChannelClosed)?;
+
         match msg {
             ClientMessage::Quit => break,
+            ClientMessage::Payload(_) => panic!("Payload mesasges should only be used by TinyRoute directly, as they rely on the inner framing of message"),
             ClientMessage::Heartbeat => {
                 let beat = vec![tinyroute::frame::Header::Heartbeat as u8];
                 if let Err(e) = sink.send(WsMessage::Binary(beat)).await {
@@ -110,8 +144,8 @@ async fn use_writer(
                     break;
                 }
             }
-            ClientMessage::Payload(payload) => {
-                if let Err(e) = sink.send(WsMessage::Binary(payload.0.to_vec())).await {
+            ClientMessage::Raw(payload) => {
+                if let Err(e) = sink.send(WsMessage::Binary(payload)).await {
                     log::error!("Failed to write payload: {}", e);
                     break;
                 }

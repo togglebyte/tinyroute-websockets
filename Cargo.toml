@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["tokio-rt"]
+default = []
 tokio-rt = ["tinyroute/tokio-rt", "async-tungstenite/tokio-runtime", "tokio"]
 async-std-rt = ["tinyroute/async-std-rt", "async-tungstenite/async-std-runtime", "async-std"]
 smol-rt = ["tinyroute/smol-rt", "smol"]

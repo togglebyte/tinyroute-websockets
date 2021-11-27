@@ -41,13 +41,13 @@ impl<A: Sync + ToAddress> Server<A> {
         Self { listener, agent }
     }
 
-    pub async fn next(&mut self, con_address: A, timeout: Option<Duration>, cap: usize) -> Result<Connection<A>> {
+    pub async fn next(&mut self, con_address: A, timeout: Option<Duration>) -> Result<Connection<A>> {
         let (tcp_stream, addr) = self.listener.accept().await?;
         let socket_addr = ConnectionAddr::Tcp(addr);
         let ws_stream = accept_async(tcp_stream).await?;
         let (sink, stream) = ws_stream.split();
 
-        let agent = self.agent.new_agent::<FramedMessage>(con_address.clone(), cap).await?;
+        let agent = self.agent.new_agent::<FramedMessage>(None, con_address.clone()).await?;
 
         let _reader_handle = spawn(spawn_reader(
             stream,
@@ -63,7 +63,7 @@ impl<A: Sync + ToAddress> Server<A> {
     }
 
     pub async fn run<F: FnMut() -> A>(mut self, timeout: Option<Duration>, mut f: F) -> Result<()> {
-        while let Ok(mut connection) = self.next((f)(), timeout, 1024).await {
+        while let Ok(mut connection) = self.next((f)(), timeout).await {
             let _server_handle = spawn(async move {
                 loop {
                     match connection.recv().await {
